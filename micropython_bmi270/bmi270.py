@@ -15,8 +15,8 @@ MicroPython Driver for the Bosch BMI270 Accelerometer/Gyro Sensor
 
 import time
 from micropython import const
-from micropython_bmi270.i2c_helpers import CBits, RegisterStruct
-
+from bmi270.i2c_helpers import CBits, RegisterStruct
+import os
 
 try:
     from typing import Tuple
@@ -28,7 +28,7 @@ except ImportError:
 __version__ = "0.0.0+auto.0"
 __repo__ = "https://github.com/jposada202020/MicroPython_BMI270.git"
 
-
+_SPI_READ_FLAG = const(0x80)
 _REG_WHOAMI = const(0x00)
 _ERROR_CODE = const(0x02)
 _COMMAND = const(0x7E)
@@ -85,6 +85,44 @@ _INIT_CTRL = const(0x59)
 _INIT_ADDR_0 = const(0x5B)
 _INIT_ADDR_1 = const(0x5C)
 _INIT_DATA = const(0x5E)
+
+# interrupt control
+_INT1_IO_CTRL = const(0x53)
+_INT2_IO_CTRL = const(0x54)
+_INT1_MAP_FEAT = const(0x56)
+_INT2_MAP_FEAT = const(0x57)
+_INT_STATUS_0  = const(0x1C)
+_INT_STATUS_1  = const(0x1D)
+_FEAT_PAGE  = const(0x2F)
+_FEATURES   = const(0x30)
+_FEATURE_0  = const(0x30)
+_FEATURE_1  = const(0x32)
+_FEATURE_2  = const(0x34)
+_FEATURE_3  = const(0x36)
+_FEATURE_4  = const(0x38)
+_FEATURE_5  = const(0x3A)
+_FEATURE_6  = const(0x3C)
+_FEATURE_7  = const(0x3E)
+
+#interrupt and features enable masks
+SIG_MOTION_MSK      = const(0x1)
+STEP_COUNTER_MSK    = const(0x2)
+ACTIVITY_MSK        = const(0x4)
+WRIST_WEAR_MSK      = const(0x8)
+WRIST_GESTURE_MSK   = const(0x10)
+NO_MOTION_MSK       = const(0x20)
+ANY_MOTION_MSK      = const(0x40)
+
+
+SENSOR_DATA_PAGE    = const(0x0)
+SETTINGS_PAGE       = const(0x1)
+MOTION_PAGE         = const(0x2)
+STEP_COUNTER_PAGE1  = const(0x3)
+STEP_COUNTER_PAGE2  = const(0x4)
+STEP_COUNTER_PAGE3  = const(0x5)
+STEP_COUNTER_PAGE4  = const(0x6)
+WRIST_GESTURE_PAGE  = const(0X6)
+WRIST_WEAR_PAGE     = const(0X7)
 
 
 class BMI270:
@@ -153,22 +191,49 @@ class BMI270:
     internal_status = RegisterStruct(0x21, "B")
 
     _init_control = RegisterStruct(_INIT_CTRL, "B")
+    
+    interrupt_status0 = RegisterStruct(_INT_STATUS_0, "B")
+    interrupt_status1 = RegisterStruct(_INT_STATUS_1, "B")
+    _interrupt_1 = RegisterStruct(_INT1_IO_CTRL, "B")
+    _interrupt_2 = RegisterStruct(_INT2_IO_CTRL, "B")
+    _interrupt_feat_1 = RegisterStruct(_INT1_MAP_FEAT, "B")
+    _interrupt_feat_2 = RegisterStruct(_INT2_MAP_FEAT, "B")
+    
+    feature_page = RegisterStruct(_FEAT_PAGE, "B")
+    feature_condata = RegisterStruct(_FEATURES, "<HHHHHHHH")
+    feature_reg_0 = RegisterStruct(_FEATURE_0, "<H")
+    feature_reg_1 = RegisterStruct(_FEATURE_1, "<H")
+    feature_reg_2 = RegisterStruct(_FEATURE_2, "<H")
+    feature_reg_3 = RegisterStruct(_FEATURE_3, "<H")
+    feature_reg_4 = RegisterStruct(_FEATURE_4, "<H")
+    feature_reg_5 = RegisterStruct(_FEATURE_5, "<H")
+    feature_reg_6 = RegisterStruct(_FEATURE_6, "<H")
+    feature_reg_7 = RegisterStruct(_FEATURE_7, "<H")
+
+    step_counter_l = RegisterStruct(_FEATURE_0, "<H")
+    step_counter_h = RegisterStruct(_FEATURE_1, "<H")
+    activity = RegisterStruct(_FEATURE_2, "<H")
+    gesture = RegisterStruct(_FEATURE_3, "<H")
 
     _init_address_0 = RegisterStruct(_INIT_ADDR_0, "B")
     _init_address_1 = RegisterStruct(_INIT_ADDR_1, "B")
     _init_data = RegisterStruct(_INIT_DATA, ">HHHHHHHHHHHHHHHH")
 
-    def __init__(self, i2c, address: int = 0x68) -> None:
+    def __init__(self, i2c=None, address: int = 0x68, spi=None, cs= None) -> None:
         self._i2c = i2c
+        self._spi = spi
+        self._cs = cs
+        if self._cs:
+            self._cs.on()
         self._address = address
 
         if self._device_id != 0x24:
-            raise RuntimeError("Failed to find BMI270")
+             raise RuntimeError("Failed to find BMI270")
 
-        # self.soft_reset()
+        self.soft_reset()
 
         self.load_config_file()
-        self.power_control = 0x0E
+        self.power_control = 0x06
         time.sleep(0.1)
         self.power_config = 0x00
         time.sleep(0.1)
@@ -213,6 +278,122 @@ class BMI270:
         """
         self._soft_reset = RESET_COMMAND
         time.sleep(0.015)
+        
+    def enable_interrupt(self, num=1, active_high=True, open_drain = False, mask=STEP_COUNTER_MSK) -> None:
+        """
+        Enable interrup pins and features
+
+        :return: None
+
+        """      
+        io_config = 0x8
+        if open_drain:
+            io_config |= 0x4
+        if active_high:
+            io_config |= 0x2
+        if num == 1:
+            self._interrupt_1 = io_config
+            time.sleep_ms(1)
+            self._interrupt_feat_1 |= mask
+            time.sleep_ms(1)
+        else:
+            self._interrupt_2 = io_config
+            time.sleep_ms(1)
+            self._interrupt_feat_2 |= mask
+            time.sleep_ms(1)
+        
+    def disable_interrupt(self) -> None:
+        """
+        disable interrup features
+
+        :return: None
+
+        """
+        self._interrupt_feat_1 = 0
+        self._interrupt_feat_2 = 0
+        
+        
+    def enable_features(self, f_mask, enable_interrupt = True) -> None:
+        """
+        Enable Features
+        f_mask: masked features to enable
+        enable_interrupt: automatic enable feature interrupt
+        :return: None
+
+        """
+        if f_mask & STEP_COUNTER_MSK:
+            self.feature_page = STEP_COUNTER_PAGE4
+            self.feature_reg_1 |= 0x1002
+            
+        if f_mask & ACTIVITY_MSK:
+            self.feature_page = STEP_COUNTER_PAGE4
+            self.feature_reg_1 |= 0x2000
+            
+        if f_mask & WRIST_WEAR_MSK:
+            self.feature_page = WRIST_WEAR_PAGE
+            self.feature_reg_0 |= 0x10
+            
+        if f_mask & WRIST_GESTURE_MSK:
+            self.feature_page = STEP_COUNTER_PAGE4
+            self.feature_reg_6 |= 0x20
+            
+        if f_mask & SIG_MOTION_MSK:
+            self.feature_page = MOTION_PAGE
+            self.feature_reg_7 |= 0x1
+            
+        if f_mask & NO_MOTION_MSK:
+            self.feature_page = MOTION_PAGE
+            self.feature_reg_1 |= 0x8000
+            
+        if f_mask & ANY_MOTION_MSK:
+            self.feature_page = SETTINGS_PAGE
+            self.feature_reg_7 |= 0x8000
+            
+        self.feature_page = 0
+            
+        if enable_interrupt:
+            self.enable_interrupt(mask=f_mask)
+            
+            
+    def disable_features(self) -> None:
+        """
+        Disable all Features
+        :return: None
+
+        """
+        self.disable_interrupt()
+        
+        #disable STEP_COUNTER, ACTIVITY_MSK, WRIST_GESTURE
+        self.feature_page = STEP_COUNTER_PAGE4
+        self.feature_reg_1 = 0
+        reg = self.feature_reg_6
+        reg &= ~0x20
+        self.feature_reg_6 = reg
+        
+        #disable WRIST_WEAR
+        self.feature_page = WRIST_WEAR_PAGE
+        reg = self.feature_reg_0
+        reg |= 0x10
+        self.feature_reg_0 = reg
+        
+        #disable NO_MOTION, SIG_MOTION
+        self.feature_page = MOTION_PAGE
+        reg = self.feature_reg_7
+        reg &= ~0x1
+        self.feature_reg_7 = reg
+        reg = self.feature_reg_1
+        reg &= ~0x8000
+        self.feature_reg_1 = reg
+        
+        #disable ANY_MOTION
+        self.feature_page = SETTINGS_PAGE
+        reg = self.feature_reg_7
+        reg &= ~0x8000
+        self.feature_reg_7 = reg
+        
+        self.feature_page = 0
+            
+            
 
     @property
     def acceleration(self) -> Tuple[float, float, float]:
@@ -290,32 +471,39 @@ class BMI270:
         (c) 2023 MIT License Kevin Sommler
         """
         if self.internal_status == 0x01:
-            print(hex(self._address), " --> Initialization already done")
+            print(hex(self._address), " -->BMI 270 Initialization already done")
         else:
-            from micropython_bmi270.config_file import bmi270_config_file
-
-            print(hex(self._address), " --> Initializing...")
-            self._power_configuration = 0x00
+            #from bmi270.config_file import bmi270_maximum_fifo_config_file as bmi270_config_file
+            fw = open(os.getcwd()+'/bmi270fw.bin','r')
+            print(hex(self._address), " -->BMI 270 Initializing...")
+            self._power_configuration = 0x07
             time.sleep(0.00045)
             self._init_control = 0x00
-            for i in range(256):
-                self._init_address_0 = 0x00
-                self._init_address_1 = i
-                time.sleep(0.03)
-                self._i2c.writeto_mem(
-                    self._address,
-                    0x5E,
-                    bytes(bmi270_config_file[i * 32 : (i + 1) * 32]),
-                )
-                time.sleep(0.000020)
+            index = 0
+            fw_buf = bytearray(257)
+            fw_buf[0] = _INIT_DATA
+            fw_mv = memoryview(fw_buf)
+            while index < 8192:
+                self._init_address_0 = ((index // 2) & 0xF)
+                time.sleep_ms(1) 
+                self._init_address_1 = ((index // 2) >> 4)
+                time.sleep_ms(1) 
+                if self._i2c:
+                    fw.readinto(fw_mv[1:])
+                    self._i2c.writeto_mem(self._address, _INIT_DATA, fw_mv[1:])
+                else:
+                    fw.readinto(fw_mv[1:])
+                    self._cs.off()
+                    self._spi.write(fw_mv)
+                    self._cs.on()
+                index += 256
+                time.sleep_ms(1)
             self._init_control = 0x01
             time.sleep(0.02)
-            print(
-                hex(self._address),
-                " --> Initialization status: "
-                + "{:08b}".format(self.internal_status)
-                + "\t(00000001 --> OK)",
-            )
+            if self.internal_status == 1:
+                print( hex(self._address), " -->BMI 270 Initialization status OK")
+            else:
+                print( hex(self._address), " -->BMI 270 Initialization ERROR")
 
     @property
     def gyro_range(self) -> str:
@@ -362,3 +550,4 @@ class BMI270:
         y = self._gyro_data_y / self._gyro_factor_cached
         z = self._gyro_data_z / self._gyro_factor_cached
         return x, y, z
+    
